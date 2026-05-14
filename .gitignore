@@ -1,0 +1,10 @@
+.env
+.venv/
+__pycache__/
+*.py[cod]
+.pytest_cache/
+health_agent.db
+langgraph_checkpoints.sqlite
+Project_Plan.md
+Day1.md
+Day2.md

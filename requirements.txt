@@ -1,0 +1,9 @@
+fastapi
+uvicorn[standard]
+pydantic-settings
+sqlalchemy
+langgraph
+langgraph-checkpoint-sqlite
+langchain-core
+pytest
+httpx

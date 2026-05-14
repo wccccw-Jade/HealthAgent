@@ -1,0 +1,20 @@
+[project]
+name = "health-agent"
+version = "0.1.0"
+description = "Personal medication reminder agent"
+requires-python = ">=3.9"
+dependencies = [
+    "fastapi",
+    "uvicorn[standard]",
+    "pydantic-settings",
+    "sqlalchemy",
+    "langgraph",
+    "langgraph-checkpoint-sqlite",
+    "langchain-core",
+    "pytest",
+    "httpx",
+]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
