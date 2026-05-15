@@ -5,6 +5,11 @@ __pycache__/
 .pytest_cache/
 health_agent.db
 langgraph_checkpoints.sqlite
+langgraph_checkpoints.sqlite-shm
+langgraph_checkpoints.sqlite-wal
 Project_Plan.md
 Day1.md
 Day2.md
+Day3.md
+Day4.md
+Day5.md

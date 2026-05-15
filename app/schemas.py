@@ -12,7 +12,7 @@ class ToolCallSummary(BaseModel):
 class ChatRequest(BaseModel):
     user_id: int
     message: str = Field(min_length=1)
-    channel: Literal["telegram", "cli"] = "telegram"
+    channel: Literal["feishu", "cli"] = "feishu"
 
 
 class ChatResponse(BaseModel):

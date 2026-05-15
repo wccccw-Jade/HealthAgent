@@ -33,8 +33,9 @@ class User(Base):
     __tablename__ = "users"
 
     id = Column(Integer, primary_key=True)
-    telegram_user_id = Column(String, unique=True, nullable=True)
-    telegram_chat_id = Column(String, unique=True, nullable=True)
+    feishu_open_id = Column(String, unique=True, nullable=True)
+    feishu_user_id = Column(String, unique=True, nullable=True)
+    feishu_chat_id = Column(String, unique=True, nullable=True)
     display_name = Column(String, nullable=True)
     timezone = Column(String, nullable=False, default="America/Chicago")
     created_at = Column(DateTime(timezone=True), nullable=False, default=utc_now)

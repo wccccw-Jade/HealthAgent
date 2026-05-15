@@ -11,4 +11,5 @@ def chat(request: ChatRequest) -> ChatResponse:
     return generate_plain_reply(
         user_id=request.user_id,
         message=request.message,
+        channel=request.channel,
     )

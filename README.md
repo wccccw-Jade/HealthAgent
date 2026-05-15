@@ -2,9 +2,17 @@
 
 Personal medication reminder Agent.
 
-Day 1 provides a FastAPI scaffold, SQLite settings, a no-tool `/chat` endpoint,
-and LangGraph scratch scripts for graph, interrupt/resume, and checkpoint
-research.
+Current Day 4 scope provides:
+
+- FastAPI `/health` and `/chat` endpoints.
+- SQLite-backed `users`, `medications`, and `reminder_logs` tables.
+- Medication add/list/update/delete services and tool wrappers.
+- A LangGraph-backed `/chat` entrypoint with per-user checkpoint thread IDs
+  using `user:{user_id}`.
+- Human-in-the-loop review for high-risk medication changes before execution:
+  dose/time updates and deletes are paused until the user replies `确认`.
+- `取消` clears the pending action without changing medication data.
+- A debug streaming entrypoint through `stream_agent_turn()`.
 
 ## Development
 
