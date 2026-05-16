@@ -10,6 +10,7 @@ from app.services.medication import (
     add_medication as add_medication_service,
     delete_medication as delete_medication_service,
     list_medications as list_medications_service,
+    resolve_medication_plan_conflict as resolve_medication_plan_conflict_service,
     update_medication as update_medication_service,
 )
 
@@ -25,6 +26,7 @@ def add_medication(
     instructions: str | None = None,
     start_date: date | None = None,
     end_date: date | None = None,
+    medication_days: int | None = None,
 ) -> dict:
     with SessionLocal() as db:
         return add_medication_service(
@@ -37,6 +39,7 @@ def add_medication(
             instructions=instructions,
             start_date=start_date,
             end_date=end_date,
+            medication_days=medication_days,
         )
 
 
@@ -92,6 +95,24 @@ def delete_medication(
         )
 
 
+def resolve_medication_plan_conflict(
+    user_id: int,
+    decision: Literal["keep_existing", "keep_requested", "reset"],
+    requested_medication: dict,
+    conflicting_medication_id: int | None = None,
+    conflicting_medication_ids: list[int] | None = None,
+) -> dict:
+    with SessionLocal() as db:
+        return resolve_medication_plan_conflict_service(
+            db=db,
+            user_id=user_id,
+            decision=decision,
+            conflicting_medication_id=conflicting_medication_id,
+            conflicting_medication_ids=conflicting_medication_ids,
+            requested_medication=requested_medication,
+        )
+
+
 @tool("add_medication")
 def add_medication_tool(
     user_id: int,
@@ -102,8 +123,9 @@ def add_medication_tool(
     instructions: Optional[str] = None,
     start_date: Optional[date] = None,
     end_date: Optional[date] = None,
+    medication_days: Optional[int] = None,
 ) -> dict:
-    """Add a medication reminder plan for a user."""
+    """Add a medication reminder plan for a user. medication_days is required unless start_date and end_date are provided."""
     return add_medication(
         user_id=user_id,
         name=name,
@@ -113,6 +135,7 @@ def add_medication_tool(
         instructions=instructions,
         start_date=start_date,
         end_date=end_date,
+        medication_days=medication_days,
     )
 
 

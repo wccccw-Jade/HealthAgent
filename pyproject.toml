@@ -15,6 +15,7 @@ dependencies = [
     "pytest",
     "httpx",
     "cryptography",
+    "apscheduler",
 ]
 
 [tool.pytest.ini_options]

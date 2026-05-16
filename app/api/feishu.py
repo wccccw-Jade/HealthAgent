@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import time
 from typing import Any
 
 from fastapi import APIRouter, Depends, HTTPException
@@ -14,8 +15,11 @@ from app.services.feishu import (
     send_text_message,
     verify_feishu_token,
 )
+from app.services.reminder import handle_reminder_feedback, handle_reminder_query
 
 router = APIRouter(prefix="/feishu", tags=["feishu"])
+_PROCESSED_MESSAGE_IDS: dict[str, float] = {}
+_MESSAGE_ID_TTL_SECONDS = 300
 
 
 @router.post("/webhook")
@@ -67,6 +71,10 @@ def feishu_webhook(payload: dict[str, Any], db: Session = Depends(get_db)) -> di
     if text is None:
         return {"ok": True, "ignored": True}
 
+    message_id = message.get("message_id")
+    if isinstance(message_id, str) and _is_duplicate_message(message_id):
+        return {"ok": True, "duplicate": True}
+
     user = get_or_create_user_from_feishu(
         db=db,
         open_id=open_id,
@@ -74,6 +82,17 @@ def feishu_webhook(payload: dict[str, Any], db: Session = Depends(get_db)) -> di
         chat_id=message.get("chat_id"),
         display_name=_display_name(sender_id),
     )
+
+    query_result = handle_reminder_query(db=db, user_id=user.id, text=text)
+    if query_result is not None:
+        send_text_message(open_id, query_result["reply"])
+        return {"ok": True}
+
+    feedback = handle_reminder_feedback(db=db, user_id=user.id, text=text)
+    if feedback is not None:
+        send_text_message(open_id, feedback["reply"])
+        return {"ok": True}
+
     response = handle_user_message(
         user_id=user.id,
         message=text,
@@ -96,3 +115,19 @@ def _display_name(sender_id: dict[str, Any]) -> str | None:
         if isinstance(value, str) and value:
             return value
     return None
+
+
+def _is_duplicate_message(message_id: str) -> bool:
+    now = time.monotonic()
+    expired_ids = [
+        stored_message_id
+        for stored_message_id, seen_at in _PROCESSED_MESSAGE_IDS.items()
+        if now - seen_at > _MESSAGE_ID_TTL_SECONDS
+    ]
+    for stored_message_id in expired_ids:
+        _PROCESSED_MESSAGE_IDS.pop(stored_message_id, None)
+
+    if message_id in _PROCESSED_MESSAGE_IDS:
+        return True
+    _PROCESSED_MESSAGE_IDS[message_id] = now
+    return False

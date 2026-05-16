@@ -22,7 +22,7 @@ from app.agent.review import (
 )
 from app.agent.rules import fallback_tool_call, preferred_tool_name
 from app.agent.state import MedicationAgentState
-from app.agent.tools import MEDICATION_TOOLS, TOOL_FUNCTIONS
+from app.agent.tools import MEDICATION_TOOLS, TOOL_FUNCTIONS, resolve_medication_plan_conflict
 from app.config import get_settings
 from app.schemas import ChatResponse, ToolCallSummary
 
@@ -285,6 +285,42 @@ def run_agent_turn(
         config = {"configurable": {"thread_id": f"user:{user_id}"}}
         decision = normalize_decision(user_message)
 
+        conflict_decision = _normalize_conflict_decision(user_message)
+        if conflict_decision is not None:
+            snapshot = graph.get_state(config)
+            conflict = _latest_medication_conflict(snapshot)
+            if conflict is None:
+                return ChatResponse(
+                    user_id=user_id,
+                    reply="没有待处理的用药计划冲突。",
+                    tool_calls=[],
+                    interrupted=False,
+                    interrupt_reason=None,
+                )
+            result = _resolve_latest_medication_conflict(
+                user_id=user_id,
+                decision=conflict_decision,
+                conflict=conflict,
+            )
+            reply = str(result.get("message") or "已处理用药计划冲突。")
+            _append_resolution_to_state(graph, config, user_message, reply)
+            return ChatResponse(
+                user_id=user_id,
+                reply=reply,
+                tool_calls=[
+                    ToolCallSummary(
+                        name="resolve_medication_plan_conflict",
+                        arguments={
+                            "decision": conflict_decision,
+                            "conflicting_medication_ids": _conflict_medication_ids(conflict),
+                        },
+                        result=result,
+                    )
+                ],
+                interrupted=False,
+                interrupt_reason=None,
+            )
+
         if decision is not None:
             snapshot = graph.get_state(config)
             if not getattr(snapshot, "next", None):
@@ -495,6 +531,83 @@ def _parse_tool_result(content: Any) -> Any:
         return {"raw": content}
 
 
+def _normalize_conflict_decision(message: str) -> Literal["keep_existing", "keep_requested", "reset"] | None:
+    text = message.strip().lower()
+    keep_existing_words = ["保留旧", "保留原", "用旧", "用原", "旧计划", "原计划"]
+    keep_requested_words = ["保留新", "用新", "替换", "改成新的", "新计划"]
+    reset_words = ["都不保留", "都不要", "重新添加", "重新录入", "全部删除"]
+
+    if any(word in text for word in reset_words):
+        return "reset"
+    if any(word in text for word in keep_requested_words):
+        return "keep_requested"
+    if any(word in text for word in keep_existing_words):
+        return "keep_existing"
+    return None
+
+
+def _latest_medication_conflict(snapshot: Any) -> dict[str, Any] | None:
+    values = getattr(snapshot, "values", None)
+    if not isinstance(values, dict):
+        return None
+    messages = values.get("messages") or []
+    for message in reversed(messages):
+        if not isinstance(message, ToolMessage):
+            continue
+        parsed = _parse_tool_result(message.content)
+        if isinstance(parsed, dict) and parsed.get("reason") == "overlapping_medication_plan":
+            conflicting = parsed.get("conflicting_medication")
+            conflicts = parsed.get("conflicting_medications")
+            requested = parsed.get("requested_medication")
+            if isinstance(conflicts, list) and conflicts and isinstance(requested, dict):
+                return parsed
+            if isinstance(conflicting, dict) and isinstance(requested, dict):
+                parsed["conflicting_medications"] = [conflicting]
+                return parsed
+    return None
+
+
+def _resolve_latest_medication_conflict(
+    user_id: int,
+    decision: Literal["keep_existing", "keep_requested", "reset"],
+    conflict: dict[str, Any],
+) -> dict[str, Any]:
+    return resolve_medication_plan_conflict(
+        user_id=user_id,
+        decision=decision,
+        conflicting_medication_ids=_conflict_medication_ids(conflict),
+        requested_medication=dict(conflict["requested_medication"]),
+    )
+
+
+def _conflict_medication_ids(conflict: dict[str, Any]) -> list[int]:
+    conflicts = conflict.get("conflicting_medications")
+    if isinstance(conflicts, list):
+        ids = [int(item["id"]) for item in conflicts if isinstance(item, dict) and item.get("id") is not None]
+        if ids:
+            return ids
+    return [int(conflict["conflicting_medication"]["id"])]
+
+
+def _append_resolution_to_state(graph: Any, config: dict[str, Any], user_message: str, reply: str) -> None:
+    update_state = getattr(graph, "update_state", None)
+    if update_state is None:
+        return
+    try:
+        update_state(
+            config,
+            {
+                "messages": [
+                    HumanMessage(content=user_message),
+                    AIMessage(content=reply),
+                ],
+                "final_reply": reply,
+            },
+        )
+    except Exception:
+        return
+
+
 def _review_status(tool_calls: list[ToolCallSummary]) -> tuple[bool, str | None]:
     for tool_call in tool_calls:
         result = tool_call.result or {}
@@ -527,6 +640,10 @@ def _reply_from_tool_calls(tool_calls: list[ToolCallSummary]) -> str | None:
 
     latest = tool_calls[-1]
     result = latest.result or {}
+    if latest.name == "add_medication" and result.get("reason") == "overlapping_medication_plan":
+        message = result.get("message")
+        if isinstance(message, str) and message:
+            return message
     if result.get("pending") is True or result.get("ok") is False:
         return None
 
@@ -538,8 +655,9 @@ def _reply_from_tool_calls(tool_calls: list[ToolCallSummary]) -> str | None:
         for medication in medications:
             times = "、".join(medication.get("times") or [])
             instructions = medication.get("instructions") or "无特殊说明"
+            end_date = medication.get("end_date") or "未设置结束日期"
             lines.append(
-                f"- {medication.get('name')}：{medication.get('dose')}，{times}，{instructions}"
+                f"- {medication.get('name')}：{medication.get('dose')}，{times}，{instructions}，用药至 {end_date}"
             )
         return "\n".join(lines)
 
@@ -548,9 +666,11 @@ def _reply_from_tool_calls(tool_calls: list[ToolCallSummary]) -> str | None:
         if latest.name == "add_medication":
             times = "、".join(medication.get("times") or [])
             instructions = medication.get("instructions") or "无特殊说明"
+            end_date = medication.get("end_date") or "未设置结束日期"
+            prefix = "这条用药计划已存在" if result.get("duplicate") is True else "已添加用药计划"
             return (
-                f"已添加用药计划：{medication.get('name')}，"
-                f"{medication.get('dose')}，{times}，{instructions}。"
+                f"{prefix}：{medication.get('name')}，"
+                f"{medication.get('dose')}，{times}，{instructions}，用药至 {end_date}。"
             )
         if latest.name == "update_medication":
             return f"已更新用药计划：{medication.get('name')}。"

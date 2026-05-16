@@ -1,12 +1,15 @@
 from __future__ import annotations
 
 import re
+from datetime import date, timedelta
 from typing import Any
 
 from app.agent.tools import list_medications
 
-CHINESE_HOUR_PATTERN = re.compile(r"(早上|上午|中午|下午|晚上)?\s*(\d{1,2})\s*点")
-DOSE_PATTERN = re.compile(r"(\d+(?:\.\d+)?)\s*(片|粒|颗|mg|毫克|ml|毫升)")
+CLOCK_TIME_PATTERN = re.compile(r"([01]?\d|2[0-3])[:：]([0-5]\d)")
+CHINESE_HOUR_PATTERN = re.compile(r"(早上|上午|中午|下午|晚上)?\s*(\d{1,2}|[一二两三四五六七八九十]+)\s*点")
+DOSE_PATTERN = re.compile(r"(\d+(?:\.\d+)?|[一二两三四五六七八九十]+)\s*(片|粒|颗|mg|毫克|ml|毫升)")
+DAYS_PATTERN = re.compile(r"(?:连续|用药|吃|服用)?\s*(\d+|[一二两三四五六七八九十]+)\s*天")
 
 
 def fallback_tool_call(user_id: int, message: str) -> dict[str, Any] | None:
@@ -58,7 +61,11 @@ def _parse_add_medication(user_id: int, text: str) -> dict[str, Any] | None:
     name = _extract_medication_name(text)
     dose = _extract_dose(text)
     time = _extract_time(text)
-    if name is None or dose is None or time is None:
+    medication_days = _extract_medication_days(text)
+    start_date = _extract_start_date(text)
+    if medication_days is None and start_date is not None:
+        medication_days = 1
+    if name is None or dose is None or time is None or medication_days is None:
         return None
 
     frequency = "daily" if any(keyword in text for keyword in ["每天", "每日", "天天"]) else "custom"
@@ -71,6 +78,8 @@ def _parse_add_medication(user_id: int, text: str) -> dict[str, Any] | None:
         "frequency": frequency,
         "times": [time],
         "instructions": instructions,
+        "medication_days": medication_days,
+        "start_date": start_date,
     }
 
 
@@ -152,16 +161,26 @@ def _extract_dose(text: str) -> str | None:
     if not match:
         return None
     value, unit = match.groups()
+    if not value.replace(".", "", 1).isdigit():
+        parsed_value = _chinese_number_to_int(value)
+        if parsed_value is None:
+            return None
+        value = str(parsed_value)
     return f"{value} {unit}"
 
 
 def _extract_time(text: str) -> str | None:
+    clock_match = CLOCK_TIME_PATTERN.search(text)
+    if clock_match:
+        hour, minute = clock_match.groups()
+        return f"{int(hour):02d}:{minute}"
+
     match = CHINESE_HOUR_PATTERN.search(text)
     if not match:
         return None
 
     period, hour_text = match.groups()
-    hour = int(hour_text)
+    hour = int(hour_text) if hour_text.isdigit() else int(_chinese_number_to_int(hour_text) or -1)
     if period in {"下午", "晚上"} and hour < 12:
         hour += 12
     if period == "中午" and hour < 11:
@@ -177,3 +196,51 @@ def _extract_instructions(text: str) -> str | None:
         if keyword in text:
             instructions.append(keyword)
     return "，".join(instructions) if instructions else None
+
+
+def _extract_medication_days(text: str) -> int | None:
+    match = DAYS_PATTERN.search(text)
+    if not match:
+        return None
+    value = match.group(1)
+    if value.isdigit():
+        return int(value)
+    return _chinese_number_to_int(value)
+
+
+def _chinese_number_to_int(value: str) -> int | None:
+    digits = {
+        "一": 1,
+        "二": 2,
+        "两": 2,
+        "三": 3,
+        "四": 4,
+        "五": 5,
+        "六": 6,
+        "七": 7,
+        "八": 8,
+        "九": 9,
+    }
+    if value == "十":
+        return 10
+    if value.startswith("十"):
+        tail = value[1:]
+        return 10 + digits.get(tail, 0)
+    if value.endswith("十"):
+        head = value[:-1]
+        return digits.get(head, 0) * 10
+    if "十" in value:
+        head, tail = value.split("十", 1)
+        return digits.get(head, 0) * 10 + digits.get(tail, 0)
+    return digits.get(value)
+
+
+def _extract_start_date(text: str) -> date | None:
+    today = date.today()
+    if "后天" in text:
+        return today + timedelta(days=2)
+    if "明天" in text or "明日" in text:
+        return today + timedelta(days=1)
+    if "今天" in text or "今日" in text:
+        return today
+    return None

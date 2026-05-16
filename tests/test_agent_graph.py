@@ -8,6 +8,7 @@ from langgraph.checkpoint.memory import InMemorySaver
 from app.agent import graph as graph_module
 from app.agent import tools
 from app.agent.graph import build_graph, run_agent_turn, stream_agent_turn
+from app.agent.rules import fallback_tool_call
 from app.services.medication import add_medication
 
 
@@ -69,6 +70,7 @@ def test_graph_lists_medications_with_tool_summary(monkeypatch, test_session_fac
             dose="2 片",
             frequency="daily",
             times=["08:00"],
+            medication_days=7,
             instructions="饭后",
         )
 
@@ -115,7 +117,7 @@ def test_fallback_adds_medication_when_model_does_not_call_tool(monkeypatch, tes
 
     response = run_agent_turn(
         user_id=1,
-        user_message="我每天早上8点吃二甲双胍2片，饭后",
+        user_message="我每天早上8点吃二甲双胍2片，饭后，吃7天",
         channel="cli",
     )
 
@@ -128,6 +130,88 @@ def test_fallback_adds_medication_when_model_does_not_call_tool(monkeypatch, tes
     medications = tools.list_medications(user_id=1)
     assert medications[0]["times"] == ["08:00"]
     assert medications[0]["dose"] == "2 片"
+    assert medications[0]["end_date"] is not None
+
+
+def test_add_medication_without_days_asks_followup(monkeypatch, test_session_factory) -> None:
+    monkeypatch.setattr(tools, "SessionLocal", test_session_factory)
+    fake_model = FakeModel(
+        [
+            AIMessage(content="请告诉我需要连续吃几天。"),
+        ]
+    )
+    compiled = build_graph(model=fake_model, checkpointer=InMemorySaver())
+    monkeypatch.setattr(graph_module, "get_graph", lambda: compiled)
+
+    response = run_agent_turn(
+        user_id=1,
+        user_message="我每天早上8点吃二甲双胍2片，饭后",
+        channel="cli",
+    )
+
+    assert response.tool_calls == []
+    assert "几天" in response.reply
+    assert tools.list_medications(user_id=1) == []
+
+
+def test_fallback_parses_tomorrow_chinese_dose_and_clock_time() -> None:
+    tool_call = fallback_tool_call(
+        user_id=1,
+        message="我明天要吃一粒布洛芬，早上九点吃",
+    )
+
+    assert tool_call is not None
+    assert tool_call["name"] == "add_medication"
+    assert tool_call["args"]["name"] == "布洛芬"
+    assert tool_call["args"]["dose"] == "1 粒"
+    assert tool_call["args"]["times"] == ["09:00"]
+    assert tool_call["args"]["medication_days"] == 1
+    assert tool_call["args"]["start_date"] is not None
+
+
+def test_overlapping_add_returns_conflict_reply(monkeypatch, test_session_factory) -> None:
+    monkeypatch.setattr(tools, "SessionLocal", test_session_factory)
+    with test_session_factory() as db:
+        add_medication(
+            db=db,
+            user_id=1,
+            name="布洛芬",
+            dose="1 粒",
+            frequency="daily",
+            times=["15:36"],
+            medication_days=3,
+        )
+
+    fake_model = FakeModel(
+        [
+            AIMessage(content="我先帮你记录。"),
+            AIMessage(content="已添加布洛芬。"),
+        ]
+    )
+    compiled = build_graph(model=fake_model, checkpointer=InMemorySaver())
+    monkeypatch.setattr(graph_module, "get_graph", lambda: compiled)
+
+    response = run_agent_turn(
+        user_id=1,
+        user_message="我每天15点吃布洛芬1粒，吃2天",
+        channel="cli",
+    )
+
+    assert response.interrupted is False
+    assert response.tool_calls[0].name == "add_medication"
+    assert response.tool_calls[0].result["ok"] is False
+    assert response.tool_calls[0].result["reason"] == "overlapping_medication_plan"
+    assert "保留旧计划" in response.reply
+    assert "保留新计划" in response.reply
+    assert len(tools.list_medications(user_id=1)) == 1
+
+    resolution = run_agent_turn(user_id=1, user_message="保留新计划", channel="cli")
+
+    assert resolution.tool_calls[0].name == "resolve_medication_plan_conflict"
+    assert resolution.tool_calls[0].result["decision"] == "keep_requested"
+    active_medications = tools.list_medications(user_id=1)
+    assert len(active_medications) == 1
+    assert active_medications[0]["times"] == ["15:00"]
 
 
 def test_fallback_lists_medications_when_model_does_not_call_tool(monkeypatch, test_session_factory) -> None:
@@ -140,6 +224,7 @@ def test_fallback_lists_medications_when_model_does_not_call_tool(monkeypatch, t
             dose="2 片",
             frequency="daily",
             times=["08:00"],
+            medication_days=7,
         )
 
     fake_model = FakeModel(
@@ -169,6 +254,7 @@ def test_dose_update_sets_interrupted(monkeypatch, test_session_factory) -> None
             dose="1 片",
             frequency="daily",
             times=["08:00"],
+            medication_days=7,
         )
     medication_id = created["medication"]["id"]
 
@@ -215,6 +301,7 @@ def test_time_update_sets_interrupted_without_persisting(monkeypatch, test_sessi
             dose="2 片",
             frequency="daily",
             times=["08:00"],
+            medication_days=7,
         )
     medication_id = created["medication"]["id"]
 
@@ -258,6 +345,7 @@ def test_delete_sets_interrupted(monkeypatch, test_session_factory) -> None:
             dose="2 片",
             frequency="daily",
             times=["08:00"],
+            medication_days=7,
         )
     medication_id = created["medication"]["id"]
 
@@ -303,6 +391,7 @@ def test_confirm_executes_pending_dose_update(monkeypatch, test_session_factory)
             dose="1 片",
             frequency="daily",
             times=["08:00"],
+            medication_days=7,
         )
     medication_id = created["medication"]["id"]
 
@@ -352,6 +441,7 @@ def test_cancel_keeps_pending_delete_from_executing(monkeypatch, test_session_fa
             dose="2 片",
             frequency="daily",
             times=["08:00"],
+            medication_days=7,
         )
     medication_id = created["medication"]["id"]
 
@@ -408,6 +498,7 @@ def test_pending_action_is_isolated_by_user(monkeypatch, test_session_factory) -
             dose="2 片",
             frequency="daily",
             times=["08:00"],
+            medication_days=7,
         )
     medication_id = created["medication"]["id"]
 
@@ -459,6 +550,7 @@ def test_multiturn_completion_uses_checkpoint_history(monkeypatch, test_session_
                             "frequency": "daily",
                             "times": ["08:00"],
                             "instructions": "饭后",
+                            "medication_days": 7,
                         },
                     }
                 ],
@@ -470,7 +562,7 @@ def test_multiturn_completion_uses_checkpoint_history(monkeypatch, test_session_
     monkeypatch.setattr(graph_module, "get_graph", lambda: compiled)
 
     first = run_agent_turn(user_id=1, user_message="帮我记录二甲双胍", channel="cli")
-    second = run_agent_turn(user_id=1, user_message="每天早上8点，2片，饭后", channel="cli")
+    second = run_agent_turn(user_id=1, user_message="每天早上8点，2片，饭后，吃7天", channel="cli")
 
     assert first.tool_calls == []
     assert second.tool_calls[0].name == "add_medication"
