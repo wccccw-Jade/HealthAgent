@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import json
+import logging
 import time
 from binascii import Error as Base64Error
 from json import JSONDecodeError
@@ -13,6 +14,8 @@ from sqlalchemy.orm import Session
 
 from app.config import get_settings
 from app.models import User
+
+logger = logging.getLogger(__name__)
 
 _TOKEN_CACHE: dict[str, Any] = {
     "token": None,
@@ -83,7 +86,7 @@ def get_tenant_access_token() -> str:
     if not settings.feishu_app_id or not settings.feishu_app_secret:
         raise RuntimeError("FEISHU_APP_ID and FEISHU_APP_SECRET are required")
 
-    response = httpx.post(
+    response = _post_with_retry(
         "https://open.feishu.cn/open-apis/auth/v3/tenant_access_token/internal",
         json={
             "app_id": settings.feishu_app_id,
@@ -91,7 +94,6 @@ def get_tenant_access_token() -> str:
         },
         timeout=10,
     )
-    response.raise_for_status()
     data = response.json()
 
     if data.get("code") not in (0, None):
@@ -113,7 +115,7 @@ def send_text_message(
     receive_id_type: str = "open_id",
 ) -> dict[str, Any]:
     token = get_tenant_access_token()
-    response = httpx.post(
+    response = _post_with_retry(
         "https://open.feishu.cn/open-apis/im/v1/messages",
         params={"receive_id_type": receive_id_type},
         headers={"Authorization": f"Bearer {token}"},
@@ -124,12 +126,39 @@ def send_text_message(
         },
         timeout=10,
     )
-    response.raise_for_status()
     data = response.json()
 
     if data.get("code") not in (0, None):
         raise RuntimeError(data.get("msg") or "Failed to send Feishu message")
     return data
+
+
+def _post_with_retry(
+    url: str,
+    *,
+    attempts: int = 3,
+    backoff_seconds: float = 0.5,
+    **kwargs: Any,
+) -> httpx.Response:
+    last_error: Exception | None = None
+    for attempt in range(1, attempts + 1):
+        try:
+            response = httpx.post(url, **kwargs)
+            response.raise_for_status()
+            return response
+        except httpx.HTTPError as exc:
+            last_error = exc
+            logger.warning(
+                "feishu request failed url=%s attempt=%s attempts=%s error=%s",
+                url,
+                attempt,
+                attempts,
+                exc,
+            )
+            if attempt < attempts:
+                time.sleep(backoff_seconds * attempt)
+
+    raise RuntimeError(f"Feishu request failed after {attempts} attempts: {last_error}")
 
 
 def get_or_create_user_from_feishu(

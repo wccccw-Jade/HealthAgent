@@ -15,6 +15,9 @@ class Settings(BaseSettings):
     feishu_encrypt_key: Optional[str] = None
     app_base_url: Optional[str] = None
     enable_scheduler: bool = True
+    langsmith_tracing: bool = False
+    langsmith_api_key: Optional[str] = None
+    langsmith_project: str = "health-agent"
 
     model_config = SettingsConfigDict(env_file=".env", env_file_encoding="utf-8")
 

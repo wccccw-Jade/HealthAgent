@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import ast
 import json
+import logging
 import sqlite3
 from collections.abc import Iterator
 from functools import lru_cache
@@ -25,6 +26,8 @@ from app.agent.state import MedicationAgentState
 from app.agent.tools import MEDICATION_TOOLS, TOOL_FUNCTIONS, resolve_medication_plan_conflict
 from app.config import get_settings
 from app.schemas import ChatResponse, ToolCallSummary
+
+logger = logging.getLogger(__name__)
 
 
 class MissingOpenAIConfigError(RuntimeError):
@@ -273,30 +276,40 @@ def run_agent_turn(
     try:
         graph = get_graph()
     except MissingOpenAIConfigError:
-        return ChatResponse(
+        response = ChatResponse(
             user_id=user_id,
             reply="当前未配置 OPENAI_API_KEY，无法启用用药 Agent。请配置后重试。",
             tool_calls=[],
             interrupted=False,
             interrupt_reason=None,
         )
+        logger.warning("agent turn skipped user_id=%s channel=%s reason=missing_openai_config", user_id, channel)
+        return response
 
     try:
         config = {"configurable": {"thread_id": f"user:{user_id}"}}
         decision = normalize_decision(user_message)
+        logger.info(
+            "agent turn started user_id=%s channel=%s resume=%s",
+            user_id,
+            channel,
+            decision is not None,
+        )
 
         conflict_decision = _normalize_conflict_decision(user_message)
         if conflict_decision is not None:
             snapshot = graph.get_state(config)
             conflict = _latest_medication_conflict(snapshot)
             if conflict is None:
-                return ChatResponse(
+                response = ChatResponse(
                     user_id=user_id,
                     reply="没有待处理的用药计划冲突。",
                     tool_calls=[],
                     interrupted=False,
                     interrupt_reason=None,
                 )
+                _log_agent_response(user_id, channel, response)
+                return response
             result = _resolve_latest_medication_conflict(
                 user_id=user_id,
                 decision=conflict_decision,
@@ -304,7 +317,7 @@ def run_agent_turn(
             )
             reply = str(result.get("message") or "已处理用药计划冲突。")
             _append_resolution_to_state(graph, config, user_message, reply)
-            return ChatResponse(
+            response = ChatResponse(
                 user_id=user_id,
                 reply=reply,
                 tool_calls=[
@@ -320,32 +333,41 @@ def run_agent_turn(
                 interrupted=False,
                 interrupt_reason=None,
             )
+            _log_agent_response(user_id, channel, response)
+            return response
 
         if decision is not None:
             snapshot = graph.get_state(config)
             if not getattr(snapshot, "next", None):
-                return ChatResponse(
+                response = ChatResponse(
                     user_id=user_id,
                     reply="没有待确认的操作。",
                     tool_calls=[],
                     interrupted=False,
                     interrupt_reason=None,
                 )
+                _log_agent_response(user_id, channel, response)
+                return response
             result = graph.invoke(Command(resume=decision), config=config)
-            return _chat_response_from_result(
+            response = _chat_response_from_result(
                 user_id=user_id,
                 result=result,
                 user_message=user_message,
                 prefer_state_tool_calls=True,
             )
+            _log_agent_response(user_id, channel, response)
+            return response
 
         result = graph.invoke(_initial_state(user_id, user_message, channel), config=config)
-        return _chat_response_from_result(
+        response = _chat_response_from_result(
             user_id=user_id,
             result=result,
             user_message=user_message,
         )
+        _log_agent_response(user_id, channel, response)
+        return response
     except Exception as exc:
+        logger.exception("agent turn failed user_id=%s channel=%s", user_id, channel)
         return ChatResponse(
             user_id=user_id,
             reply=f"Agent 执行失败：{type(exc).__name__}: {exc}",
@@ -353,6 +375,16 @@ def run_agent_turn(
             interrupted=False,
             interrupt_reason=None,
         )
+
+
+def _log_agent_response(user_id: int, channel: str, response: ChatResponse) -> None:
+    logger.info(
+        "agent turn completed user_id=%s channel=%s interrupted=%s tool_calls=%s",
+        user_id,
+        channel,
+        response.interrupted,
+        [tool.name for tool in response.tool_calls],
+    )
 
 
 def stream_agent_turn(

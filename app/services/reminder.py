@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+import logging
 from collections.abc import Callable
 from datetime import date, datetime, time, timedelta, timezone
 from typing import Any
@@ -12,6 +13,8 @@ from sqlalchemy.orm import Session, joinedload
 
 from app.models import Medication, ReminderLog, ReminderStatus
 from app.services.feishu import send_text_message
+
+logger = logging.getLogger(__name__)
 
 ReminderSender = Callable[[str, str], Any]
 
@@ -80,6 +83,13 @@ def create_due_reminder_logs(
                 scheduled_for=scheduled_for,
             )
             if created_id is not None:
+                logger.info(
+                    "created reminder log id=%s user_id=%s medication_id=%s scheduled_for=%s",
+                    created_id,
+                    medication.user_id,
+                    medication.id,
+                    scheduled_for.isoformat(),
+                )
                 created_ids.append(created_id)
 
     return created_ids
@@ -109,6 +119,7 @@ def send_pending_reminders(
             log.status = ReminderStatus.FAILED.value
             log.response_text = "Missing Feishu open_id for reminder delivery."
             db.commit()
+            logger.warning("reminder delivery failed log_id=%s reason=missing_open_id", log.id)
             continue
 
         try:
@@ -117,11 +128,13 @@ def send_pending_reminders(
             log.status = ReminderStatus.FAILED.value
             log.response_text = str(exc)
             db.commit()
+            logger.exception("reminder delivery failed log_id=%s", log.id)
             continue
 
         log.status = ReminderStatus.SENT.value
         log.sent_at = current
         db.commit()
+        logger.info("reminder sent log_id=%s user_id=%s", log.id, log.user_id)
         sent_ids.append(int(log.id))
 
     return sent_ids
@@ -154,6 +167,11 @@ def mark_reminder_taken(
         medication_id=medication_id,
     )
     if match["status"] != "ok":
+        logger.info(
+            "mark reminder taken skipped user_id=%s reason=%s",
+            user_id,
+            match.get("reason"),
+        )
         return match
 
     log = match["log"]
@@ -164,6 +182,12 @@ def mark_reminder_taken(
     if course_completed and log.medication is not None:
         log.medication.is_active = False
     db.commit()
+    logger.info(
+        "reminder marked taken log_id=%s user_id=%s course_completed=%s",
+        log.id,
+        user_id,
+        course_completed,
+    )
     suffix = "该用药计划已完成，已自动停止提醒。" if course_completed else "该用药计划还未结束，会继续按计划提醒。"
     return {
         "ok": True,
@@ -198,6 +222,11 @@ def snooze_reminder(
         medication_id=medication_id,
     )
     if match["status"] != "ok":
+        logger.info(
+            "snooze reminder skipped user_id=%s reason=%s",
+            user_id,
+            match.get("reason"),
+        )
         return match
 
     log = match["log"]
@@ -208,11 +237,18 @@ def snooze_reminder(
     log.updated_at = current
     db.commit()
 
-    _create_log_if_missing(
+    snoozed_log_id = _create_log_if_missing(
         db=db,
         user_id=int(log.user_id),
         medication_id=int(log.medication_id),
         scheduled_for=snoozed_until,
+    )
+    logger.info(
+        "reminder snoozed log_id=%s user_id=%s minutes=%s next_log_id=%s",
+        log.id,
+        user_id,
+        minutes,
+        snoozed_log_id,
     )
 
     local_time = _format_user_local_time(snoozed_until, log.user.timezone if log.user else "UTC")
